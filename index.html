@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ƒ(x) plotter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/12.4.0/math.min.js"></script>
+<style>
+  :root {
+    --bg: #f2efe6;
+    --panel: #fbfaf7;
+    --line: #ddd8cb;
+    --grid: #e6e2d8;
+    --axis: #3a3a3a;
+    --ink: #2b2b28;
+    --muted: #8a8578;
+    --faint: #a8a293;
+    --mono: 'SF Mono','Menlo','Consolas',monospace;
+    --serif: 'Times New Roman', Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #e8e4d8;
+    font-family: var(--mono);
+    color: var(--ink);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 16px;
+  }
+  .app {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 1100px;
+    height: calc(100vh - 32px);
+    max-height: 760px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 16px 50px -16px rgba(40,38,30,0.35);
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 14px 18px 11px;
+    border-bottom: 1px solid var(--line);
+  }
+  .logo { font-family: var(--serif); font-size: 23px; font-style: italic; letter-spacing: .3px; }
+  .sub { font-size: 12px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+  .hint { margin-left: auto; font-size: 11px; color: var(--faint); }
+  .body { display: flex; flex: 1; min-height: 0; }
+  .sidebar {
+    width: 290px;
+    padding: 14px;
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .row { display: flex; flex-direction: column; gap: 4px; }
+  .row-main { display: flex; align-items: center; gap: 8px; }
+  .swatch {
+    width: 16px; height: 16px; border-radius: 4px; border: none;
+    cursor: pointer; flex-shrink: 0; padding: 0;
+  }
+  .yeq { color: var(--muted); font-style: italic; font-family: var(--serif); font-size: 15px; }
+  input.expr {
+    flex: 1; min-width: 0; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 8px; font-family: var(--mono); font-size: 13px; color: var(--ink);
+    outline: none;
+  }
+  input.expr.err { border-color: #e63946; }
+  .del {
+    border: none; background: transparent; color: #b8b2a3;
+    cursor: pointer; font-size: 16px; line-height: 1; padding: 2px;
+  }
+  .del:hover { color: #e63946; }
+  .errmsg { font-size: 10.5px; color: #e63946; padding-left: 24px; }
+  .readout { font-size: 11px; padding-left: 24px; }
+  .addbtn {
+    margin-top: 4px; border: 1px dashed #c4bdae; background: transparent;
+    border-radius: 6px; padding: 8px; cursor: pointer; color: #6d6757;
+    font-family: var(--mono); font-size: 12px;
+  }
+  .addbtn:hover { background: #ece7da; }
+  .footer { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line); }
+  .footer .cap { font-size: 10px; color: var(--faint); margin-bottom: 6px; letter-spacing: .5px; }
+  .footer .list { font-size: 11px; color: var(--muted); line-height: 1.6; }
+  .canvas-wrap { flex: 1; position: relative; min-width: 0; }
+  canvas { display: block; cursor: crosshair; touch-action: none; }
+  .controls {
+    position: absolute; top: 12px; right: 12px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .controls button {
+    width: 34px; height: 34px; border-radius: 8px;
+    border: 1px solid var(--line); background: #fbfaf7ee;
+    backdrop-filter: blur(4px); cursor: pointer; font-size: 17px; color: #4a463c;
+    box-shadow: 0 2px 6px -2px rgba(0,0,0,0.15);
+  }
+  .controls button:hover { background: #fff; }
+  @media (max-width: 640px) {
+    .body { flex-direction: column; }
+    .sidebar { width: 100%; max-height: 230px; border-right: none; border-bottom: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="logo">ƒ(x)</span>
+    <span class="sub">plotter</span>
+    <span class="hint">drag to pan · scroll to zoom</span>
+  </header>
+  <div class="body">
+    <div class="sidebar" id="sidebar"></div>
+    <div class="canvas-wrap" id="wrap">
+      <canvas id="cv"></canvas>
+      <div class="controls">
+        <button id="zin">+</button>
+        <button id="zout">−</button>
+        <button id="reset">⟲</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PALETTE = ["#e63946","#2a9d8f","#e9c46a","#6d6af5","#f4a261","#118ab2","#d62db4"];
+
+let fns = [
+  { id:1, expr:"sin(x)", color:PALETTE[0], visible:true },
+  { id:2, expr:"x^2 / 4", color:PALETTE[1], visible:true },
+];
+let nextId = 3;
+let view = { cx:0, cy:0, scale:40 };   // scale = px per unit
+let size = { w:800, h:560 };
+let cursor = null;                      // {x}
+let drag = null;
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const wrap = document.getElementById("wrap");
+const sidebar = document.getElementById("sidebar");
+
+// ---- compile ----
+function compile() {
+  return fns.map(f => {
+    if (!f.visible || !f.expr.trim()) return { ...f, fn:null, error:null };
+    try {
+      const code = math.parse(f.expr).compile();
+      code.evaluate({ x:1 });
+      return { ...f, fn:(x)=>code.evaluate({x}), error:null };
+    } catch(e) {
+      return { ...f, fn:null, error:e.message };
+    }
+  });
+}
+let compiled = compile();
+
+// ---- transforms ----
+const toPxX = x => size.w/2 + (x - view.cx)*view.scale;
+const toPxY = y => size.h/2 - (y - view.cy)*view.scale;
+const toMathX = px => view.cx + (px - size.w/2)/view.scale;
+const toMathY = py => view.cy - (py - size.h/2)/view.scale;
+
+function niceStep(rough){
+  const pow = Math.pow(10, Math.floor(Math.log10(rough)));
+  const n = rough/pow;
+  let m;
+  if (n < 1.5) m=1; else if (n<3) m=2; else if (n<7) m=5; else m=10;
+  return m*pow;
+}
+
+// ---- draw ----
+function draw(){
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = size.w*dpr; cv.height = size.h*dpr;
+  cv.style.width = size.w+"px"; cv.style.height = size.h+"px";
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,size.w,size.h);
+  ctx.fillStyle = "#fbfaf7";
+  ctx.fillRect(0,0,size.w,size.h);
+
+  const step = niceStep(80/view.scale);
+  const xMin = toMathX(0), xMax = toMathX(size.w);
+  const yMin = toMathY(size.h), yMax = toMathY(0);
+
+  ctx.font = "11px var(--mono), monospace";
+  ctx.textBaseline = "top";
+
+  for (let gx = Math.ceil(xMin/step)*step; gx <= xMax; gx += step) {
+    const px = toPxX(gx);
+    const isAxis = Math.abs(gx) < step/1e6;
+    ctx.strokeStyle = isAxis ? "#3a3a3a" : "#e6e2d8";
+    ctx.lineWidth = isAxis ? 1.4 : 1;
+    ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,size.h); ctx.stroke();
+    if (!isAxis) {
+      const axisY = Math.min(Math.max(toPxY(0),14), size.h-16);
+      ctx.fillStyle = "#8a8578";
+      ctx.fillText(String(+gx.toFixed(6)), px+3, axisY+3);
+    }
+  }
+  for (let gy = Math.ceil(yMin/step)*step; gy <= yMax; gy += step) {
+    const py = toPxY(gy);
+    const isAxis = Math.abs(gy) < step/1e6;
+    ctx.strokeStyle = isAxis ? "#3a3a3a" : "#e6e2d8";
+    ctx.lineWidth = isAxis ? 1.4 : 1;
+    ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(size.w,py); ctx.stroke();
+    if (!isAxis) {
+      const axisX = Math.min(Math.max(toPxX(0),4), size.w-30);
+      ctx.fillStyle = "#8a8578";
+      ctx.fillText(String(+gy.toFixed(6)), axisX+4, py+2);
+    }
+  }
+  ctx.fillStyle = "#8a8578";
+  ctx.fillText("0", toPxX(0)+4, toPxY(0)+3);
+
+  compiled.forEach(f => {
+    if (!f.fn || f.error) return;
+    ctx.strokeStyle = f.color;
+    ctx.lineWidth = 2.2;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    let pen = false, prevY = null;
+    for (let px = 0; px <= size.w; px += 1) {
+      const x = toMathX(px);
+      let y;
+      try { y = f.fn(x); } catch { pen=false; prevY=null; continue; }
+      if (typeof y !== "number" || !isFinite(y)) { pen=false; prevY=null; continue; }
+      const py = toPxY(y);
+      if (prevY !== null && Math.abs(py-prevY) > size.h*1.5) pen = false;
+      if (!pen) { ctx.moveTo(px,py); pen=true; } else { ctx.lineTo(px,py); }
+      prevY = py;
+    }
+    ctx.stroke();
+  });
+
+  if (cursor) {
+    const px = toPxX(cursor.x);
+    ctx.strokeStyle = "#bbb6a8";
+    ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,size.h); ctx.stroke();
+    ctx.setLineDash([]);
+    compiled.forEach(f => {
+      if (!f.fn || f.error) return;
+      let y; try { y = f.fn(cursor.x); } catch { return; }
+      if (typeof y !== "number" || !isFinite(y)) return;
+      const py = toPxY(y);
+      ctx.fillStyle = f.color; ctx.strokeStyle = "#fbfaf7"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px,py,4.5,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    });
+  }
+}
+
+// ---- sidebar render ----
+function renderSidebar(){
+  sidebar.innerHTML = "";
+  fns.forEach(f => {
+    const c = compiled.find(c => c.id === f.id);
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const main = document.createElement("div");
+    main.className = "row-main";
+
+    const sw = document.createElement("button");
+    sw.className = "swatch";
+    sw.title = f.visible ? "hide" : "show";
+    sw.style.background = f.visible ? f.color : "transparent";
+    sw.style.boxShadow = f.visible ? "none" : `inset 0 0 0 2px ${f.color}`;
+    sw.onclick = () => { f.visible = !f.visible; recompute(); };
+
+    const yeq = document.createElement("span");
+    yeq.className = "yeq"; yeq.textContent = "y=";
+
+    const inp = document.createElement("input");
+    inp.className = "expr" + (c && c.error ? " err" : "");
+    inp.value = f.expr;
+    inp.placeholder = "例: cos(x) + x/2";
+    inp.spellcheck = false;
+    inp.oninput = (e) => {
+      f.expr = e.target.value;
+      compiled = compile();
+      // light update: re-render readouts/errors + redraw, keep focus
+      updateRow(row, f);
+      draw();
+    };
+
+    const del = document.createElement("button");
+    del.className = "del"; del.title = "remove"; del.textContent = "×";
+    del.onclick = () => { fns = fns.filter(x => x.id !== f.id); recompute(); };
+
+    main.append(sw, yeq, inp, del);
+    row.append(main);
+
+    const extra = document.createElement("div");
+    extra.className = "extra";
+    row.append(extra);
+    row._extra = extra; row._input = inp;
+    updateRow(row, f);
+
+    sidebar.append(row);
+  });
+
+  const add = document.createElement("button");
+  add.className = "addbtn";
+  add.textContent = "+ 関数を追加";
+  add.onclick = () => {
+    fns.push({ id:nextId, expr:"", color:PALETTE[nextId%PALETTE.length], visible:true });
+    nextId++; recompute();
+  };
+  sidebar.append(add);
+
+  const footer = document.createElement("div");
+  footer.className = "footer";
+  footer.innerHTML = '<div class="cap">使える記法</div>' +
+    '<div class="list">sin cos tan · log ln exp · sqrt abs · ^ (べき乗) · pi e · floor mod</div>';
+  sidebar.append(footer);
+}
+
+function updateRow(row, f){
+  const c = compiled.find(c => c.id === f.id);
+  if (row._input) row._input.className = "expr" + (c && c.error ? " err" : "");
+  const ex = row._extra;
+  ex.innerHTML = "";
+  if (c && c.error) {
+    const e = document.createElement("div");
+    e.className = "errmsg"; e.textContent = c.error;
+    ex.append(e);
+  } else if (cursor && f.visible && c && c.fn) {
+    let y; try { y = c.fn(cursor.x); } catch { y = null; }
+    if (typeof y === "number" && isFinite(y)) {
+      const r = document.createElement("div");
+      r.className = "readout";
+      r.style.color = f.color;
+      r.textContent = `(${cursor.x.toFixed(3)}, ${y.toFixed(3)})`;
+      ex.append(r);
+    }
+  }
+}
+
+function refreshReadouts(){
+  Array.from(sidebar.children).forEach(row => {
+    if (row._input) {
+      const f = fns.find(x => x._input === undefined && x.expr === row._input.value);
+    }
+  });
+  // simpler: re-render extras by id mapping
+  fns.forEach((f, i) => {
+    const row = sidebar.children[i];
+    if (row && row._extra) updateRow(row, f);
+  });
+}
+
+function recompute(){
+  compiled = compile();
+  renderSidebar();
+  draw();
+}
+
+// ---- interaction ----
+cv.addEventListener("pointerdown", e => {
+  drag = { sx:e.clientX, sy:e.clientY, cx:view.cx, cy:view.cy };
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove", e => {
+  const r = cv.getBoundingClientRect();
+  cursor = { x: toMathX(e.clientX - r.left) };
+  if (drag) {
+    const dx = (e.clientX - drag.sx)/view.scale;
+    const dy = (e.clientY - drag.sy)/view.scale;
+    view.cx = drag.cx - dx;
+    view.cy = drag.cy + dy;
+  }
+  refreshReadouts();
+  draw();
+});
+cv.addEventListener("pointerup", () => { drag = null; });
+cv.addEventListener("pointerleave", () => { cursor = null; refreshReadouts(); draw(); });
+
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  const r = cv.getBoundingClientRect();
+  const px = e.clientX - r.left, py = e.clientY - r.top;
+  const mx = toMathX(px), my = toMathY(py);
+  const factor = e.deltaY < 0 ? 1.12 : 1/1.12;
+  const ns = Math.min(Math.max(view.scale*factor, 0.5), 100000);
+  view.cx = mx - (px - size.w/2)/ns;
+  view.cy = my + (py - size.h/2)/ns;
+  view.scale = ns;
+  draw();
+}, { passive:false });
+
+document.getElementById("zin").onclick = () => { view.scale = Math.min(view.scale*1.25, 100000); draw(); };
+document.getElementById("zout").onclick = () => { view.scale = Math.max(view.scale*0.8, 0.5); draw(); };
+document.getElementById("reset").onclick = () => { view = {cx:0,cy:0,scale:40}; draw(); };
+
+// ---- resize ----
+const ro = new ResizeObserver(() => {
+  size = { w: wrap.clientWidth, h: wrap.clientHeight };
+  draw();
+});
+ro.observe(wrap);
+
+// init
+size = { w: wrap.clientWidth, h: wrap.clientHeight };
+renderSidebar();
+draw();
+</script>
+</body>
+</html>
