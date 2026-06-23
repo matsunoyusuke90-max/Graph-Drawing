@@ -51,7 +51,14 @@
   }
   .logo { font-family: var(--serif); font-size: 23px; font-style: italic; letter-spacing: .3px; }
   .sub { font-size: 12px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
-  .hint { margin-left: auto; font-size: 11px; color: var(--faint); }
+  .modes { margin-left: auto; display: flex; gap: 4px; }
+  .modes button {
+    font-family: var(--mono); font-size: 11px; padding: 5px 9px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+    cursor: pointer; border-radius: 6px;
+  }
+  .modes button.on { background: var(--ink); color: #f2efe6; border-color: var(--ink); }
+  .hint { font-size: 11px; color: var(--faint); }
   .body { display: flex; flex: 1; min-height: 0; }
   .sidebar {
     width: 290px;
@@ -62,6 +69,17 @@
     flex-direction: column;
     gap: 10px;
   }
+  .note { font-size: 11px; color: var(--muted); line-height: 1.5; background: #ece7da; border-radius: 6px; padding: 7px 9px; }
+  .range-ctl { display: flex; flex-direction: column; gap: 5px; padding: 0 2px; }
+  .range-lab { font-size: 11px; color: var(--muted); }
+  .range-ctl input[type=range] { width: 100%; accent-color: #6d6757; cursor: pointer; }
+  .views { display: flex; flex-wrap: wrap; gap: 4px; }
+  .views button {
+    flex: 1; min-width: 0; font-family: var(--mono); font-size: 11px; padding: 5px 4px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+    cursor: pointer; border-radius: 6px;
+  }
+  .views button:hover { background: #ece7da; color: var(--ink); }
   .row { display: flex; flex-direction: column; gap: 4px; }
   .row-main { display: flex; align-items: center; gap: 8px; }
   .swatch {
@@ -108,6 +126,7 @@
   @media (max-width: 640px) {
     .body { flex-direction: column; }
     .sidebar { width: 100%; max-height: 230px; border-right: none; border-bottom: 1px solid var(--line); }
+    header { flex-wrap: wrap; }
   }
 </style>
 </head>
@@ -116,7 +135,12 @@
   <header>
     <span class="logo">ƒ(x)</span>
     <span class="sub">plotter</span>
-    <span class="hint">drag to pan · scroll to zoom</span>
+    <div class="modes" id="modes">
+      <button data-m="curve" class="on">y=ƒ(x)</button>
+      <button data-m="heat">▦ z(x,y)</button>
+      <button data-m="surface">⛰ 3D</button>
+    </div>
+    <span class="hint" id="hint">drag to pan · scroll to zoom</span>
   </header>
   <div class="body">
     <div class="sidebar" id="sidebar"></div>
@@ -134,27 +158,35 @@
 <script>
 const PALETTE = ["#e63946","#2a9d8f","#e9c46a","#6d6af5","#f4a261","#118ab2","#d62db4"];
 
+let mode = "curve";                       // "curve" | "heat" | "surface"
 let fns = [
   { id:1, expr:"sin(x)", color:PALETTE[0], visible:true },
   { id:2, expr:"x^2 / 4", color:PALETTE[1], visible:true },
 ];
 let nextId = 3;
-let view = { cx:0, cy:0, scale:40 };   // scale = px per unit
+let view = { cx:0, cy:0, scale:40 };      // 2D: scale = px per unit
+let cam = { az:-0.9, el:0.5, range:6, zoom:1, panX:0, panY:0 };  // 3D camera
 let size = { w:800, h:560 };
-let cursor = null;                      // {x}
+let cursor = null;                        // {x,y}
 let drag = null;
 
 const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d");
 const wrap = document.getElementById("wrap");
 const sidebar = document.getElementById("sidebar");
+const hintEl = document.getElementById("hint");
 
 // ---- compile ----
 function compile() {
+  const twoVar = mode !== "curve";
   return fns.map(f => {
     if (!f.visible || !f.expr.trim()) return { ...f, fn:null, error:null };
     try {
       const code = math.parse(f.expr).compile();
+      if (twoVar) {
+        code.evaluate({ x:1, y:1 });
+        return { ...f, fn:(x,y)=>code.evaluate({x,y}), error:null };
+      }
       code.evaluate({ x:1 });
       return { ...f, fn:(x)=>code.evaluate({x}), error:null };
     } catch(e) {
@@ -164,7 +196,7 @@ function compile() {
 }
 let compiled = compile();
 
-// ---- transforms ----
+// ---- transforms (2D) ----
 const toPxX = x => size.w/2 + (x - view.cx)*view.scale;
 const toPxY = y => size.h/2 - (y - view.cy)*view.scale;
 const toMathX = px => view.cx + (px - size.w/2)/view.scale;
@@ -178,7 +210,24 @@ function niceStep(rough){
   return m*pow;
 }
 
-// ---- draw ----
+// ---- color helpers ----
+function hexToRgb(h){ h=h.replace('#',''); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
+function clamp8(v){ return Math.max(0,Math.min(255,Math.round(v))); }
+function shade(hex,b){ const c=hexToRgb(hex); return `rgb(${clamp8(c[0]*b)},${clamp8(c[1]*b)},${clamp8(c[2]*b)})`; }
+const RAMP = [[0,'#440154'],[0.25,'#3b528b'],[0.5,'#21918c'],[0.75,'#5ec962'],[1,'#fde725']];
+function ramp(t){
+  t = Math.max(0,Math.min(1,t));
+  for (let i=1;i<RAMP.length;i++){
+    if (t<=RAMP[i][0]){
+      const a=RAMP[i-1], b=RAMP[i], f=(t-a[0])/(b[0]-a[0]);
+      const ca=hexToRgb(a[1]), cb=hexToRgb(b[1]);
+      return `rgb(${Math.round(ca[0]+(cb[0]-ca[0])*f)},${Math.round(ca[1]+(cb[1]-ca[1])*f)},${Math.round(ca[2]+(cb[2]-ca[2])*f)})`;
+    }
+  }
+  return RAMP[RAMP.length-1][1];
+}
+
+// ---- draw dispatch ----
 function draw(){
   const dpr = window.devicePixelRatio || 1;
   cv.width = size.w*dpr; cv.height = size.h*dpr;
@@ -188,19 +237,27 @@ function draw(){
   ctx.fillStyle = "#fbfaf7";
   ctx.fillRect(0,0,size.w,size.h);
 
+  if (mode === "curve")      { drawGrid(true); drawCurves(); drawCursor(); }
+  else if (mode === "heat")  { drawHeat(); }
+  else                       { drawSurface(); }
+}
+
+// ---- 2D grid / axes ----
+function drawGrid(full){
   const step = niceStep(80/view.scale);
   const xMin = toMathX(0), xMax = toMathX(size.w);
   const yMin = toMathY(size.h), yMax = toMathY(0);
-
   ctx.font = "11px var(--mono), monospace";
   ctx.textBaseline = "top";
 
   for (let gx = Math.ceil(xMin/step)*step; gx <= xMax; gx += step) {
     const px = toPxX(gx);
     const isAxis = Math.abs(gx) < step/1e6;
-    ctx.strokeStyle = isAxis ? "#3a3a3a" : "#e6e2d8";
-    ctx.lineWidth = isAxis ? 1.4 : 1;
-    ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,size.h); ctx.stroke();
+    if (full || isAxis) {
+      ctx.strokeStyle = isAxis ? "#3a3a3a" : "#e6e2d8";
+      ctx.lineWidth = isAxis ? 1.4 : 1;
+      ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,size.h); ctx.stroke();
+    }
     if (!isAxis) {
       const axisY = Math.min(Math.max(toPxY(0),14), size.h-16);
       ctx.fillStyle = "#8a8578";
@@ -210,9 +267,11 @@ function draw(){
   for (let gy = Math.ceil(yMin/step)*step; gy <= yMax; gy += step) {
     const py = toPxY(gy);
     const isAxis = Math.abs(gy) < step/1e6;
-    ctx.strokeStyle = isAxis ? "#3a3a3a" : "#e6e2d8";
-    ctx.lineWidth = isAxis ? 1.4 : 1;
-    ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(size.w,py); ctx.stroke();
+    if (full || isAxis) {
+      ctx.strokeStyle = isAxis ? "#3a3a3a" : "#e6e2d8";
+      ctx.lineWidth = isAxis ? 1.4 : 1;
+      ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(size.w,py); ctx.stroke();
+    }
     if (!isAxis) {
       const axisX = Math.min(Math.max(toPxX(0),4), size.w-30);
       ctx.fillStyle = "#8a8578";
@@ -221,7 +280,10 @@ function draw(){
   }
   ctx.fillStyle = "#8a8578";
   ctx.fillText("0", toPxX(0)+4, toPxY(0)+3);
+}
 
+// ---- curve mode ----
+function drawCurves(){
   compiled.forEach(f => {
     if (!f.fn || f.error) return;
     ctx.strokeStyle = f.color;
@@ -241,27 +303,287 @@ function draw(){
     }
     ctx.stroke();
   });
+}
+function drawCursor(){
+  if (!cursor) return;
+  const px = toPxX(cursor.x);
+  ctx.strokeStyle = "#bbb6a8";
+  ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,size.h); ctx.stroke();
+  ctx.setLineDash([]);
+  compiled.forEach(f => {
+    if (!f.fn || f.error) return;
+    let y; try { y = f.fn(cursor.x); } catch { return; }
+    if (typeof y !== "number" || !isFinite(y)) return;
+    const py = toPxY(y);
+    ctx.fillStyle = f.color; ctx.strokeStyle = "#fbfaf7"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(px,py,4.5,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  });
+}
 
-  if (cursor) {
-    const px = toPxX(cursor.x);
-    ctx.strokeStyle = "#bbb6a8";
-    ctx.setLineDash([4,4]); ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,size.h); ctx.stroke();
-    ctx.setLineDash([]);
-    compiled.forEach(f => {
-      if (!f.fn || f.error) return;
-      let y; try { y = f.fn(cursor.x); } catch { return; }
-      if (typeof y !== "number" || !isFinite(y)) return;
-      const py = toPxY(y);
-      ctx.fillStyle = f.color; ctx.strokeStyle = "#fbfaf7"; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(px,py,4.5,0,Math.PI*2); ctx.fill(); ctx.stroke();
-    });
+// ---- heatmap mode (z = f(x,y)) ----
+let heatCache = { sig:null, canvas:null, zmin:0, zmax:0 };
+
+function drawHeat(){
+  const f = compiled.find(c => c.visible && c.fn && !c.error);
+  if (!f) { drawGrid(false); return; }
+  const cell = drag ? 12 : 6;
+  const sig = [view.cx, view.cy, view.scale, size.w, size.h, f.expr, cell].join("|");
+  if (heatCache.sig !== sig) { buildHeat(f, cell); heatCache.sig = sig; }
+  if (heatCache.canvas) ctx.drawImage(heatCache.canvas, 0, 0, size.w, size.h);
+  drawGrid(false);
+  drawColorbar(heatCache.zmin, heatCache.zmax);
+  drawHeatCursor(f);
+}
+
+function buildHeat(f, cell){
+  const oc = document.createElement("canvas");
+  oc.width = size.w; oc.height = size.h;
+  const o = oc.getContext("2d");
+  const cols = Math.ceil(size.w/cell)+1, rows = Math.ceil(size.h/cell)+1;
+  const zs = new Float64Array(cols*rows);
+  let zmin = Infinity, zmax = -Infinity;
+  for (let j=0;j<rows;j++) for (let i=0;i<cols;i++){
+    const mx = toMathX(i*cell), my = toMathY(j*cell);
+    let z; try { z = f.fn(mx,my); } catch { z = NaN; }
+    if (typeof z !== "number" || !isFinite(z)) z = NaN;
+    zs[j*cols+i] = z;
+    if (!isNaN(z)) { if (z<zmin) zmin=z; if (z>zmax) zmax=z; }
   }
+  const span = (zmax-zmin) || 1;
+  for (let j=0;j<rows;j++) for (let i=0;i<cols;i++){
+    const z = zs[j*cols+i];
+    if (isNaN(z)) continue;
+    o.fillStyle = ramp((z-zmin)/span);
+    o.fillRect(i*cell, j*cell, cell+1, cell+1);
+  }
+  drawContours(o, zs, cols, rows, cell, zmin, zmax);
+  heatCache.canvas = oc; heatCache.zmin = zmin; heatCache.zmax = zmax;
+}
+
+const SEG = {1:["L","T"],2:["T","R"],3:["L","R"],4:["R","B"],5:["L","T","R","B"],
+             6:["T","B"],7:["L","B"],8:["B","L"],9:["T","B"],10:["T","R","B","L"],
+             11:["R","B"],12:["L","R"],13:["T","R"],14:["L","T"]};
+function drawContours(o, zs, cols, rows, cell, zmin, zmax){
+  if (!isFinite(zmin) || zmin === zmax) return;
+  const step = niceStep((zmax-zmin)/8);
+  o.lineWidth = 1; o.strokeStyle = "rgba(40,38,30,0.32)";
+  for (let level = Math.ceil(zmin/step)*step; level < zmax; level += step){
+    o.beginPath();
+    for (let j=0;j<rows-1;j++) for (let i=0;i<cols-1;i++){
+      const z0=zs[j*cols+i], z1=zs[j*cols+i+1], z2=zs[(j+1)*cols+i+1], z3=zs[(j+1)*cols+i];
+      if (isNaN(z0)||isNaN(z1)||isNaN(z2)||isNaN(z3)) continue;
+      const b = (z0>level?1:0)|(z1>level?2:0)|(z2>level?4:0)|(z3>level?8:0);
+      const segs = SEG[b]; if (!segs) continue;
+      const x0=i*cell, y0=j*cell, x1=x0+cell, y1=y0+cell;
+      const E = {
+        T:[x0+cell*(level-z0)/(z1-z0), y0],
+        R:[x1, y0+cell*(level-z1)/(z2-z1)],
+        B:[x0+cell*(level-z3)/(z2-z3), y1],
+        L:[x0, y0+cell*(level-z0)/(z3-z0)]
+      };
+      for (let k=0;k<segs.length;k+=2){
+        const a=E[segs[k]], c=E[segs[k+1]];
+        o.moveTo(a[0],a[1]); o.lineTo(c[0],c[1]);
+      }
+    }
+    o.stroke();
+  }
+}
+
+function drawColorbar(zmin, zmax){
+  if (!isFinite(zmin) || !isFinite(zmax)) return;
+  const x=14, y=18, w=12, h=120;
+  for (let k=0;k<h;k++){ ctx.fillStyle = ramp(1-k/h); ctx.fillRect(x, y+k, w, 1); }
+  ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 1; ctx.strokeRect(x,y,w,h);
+  ctx.fillStyle = "#4a463c"; ctx.font = "10px monospace"; ctx.textBaseline = "top";
+  ctx.fillText("z", x, y-13);
+  ctx.fillText(String(+zmax.toFixed(3)), x+w+4, y-1);
+  ctx.fillText(String(+zmin.toFixed(3)), x+w+4, y+h-9);
+}
+
+function drawHeatCursor(f){
+  if (!cursor) return;
+  const px = toPxX(cursor.x), py = toPxY(cursor.y);
+  ctx.strokeStyle = "rgba(40,38,30,0.5)"; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px,0); ctx.lineTo(px,size.h);
+  ctx.moveTo(0,py); ctx.lineTo(size.w,py);
+  ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = "#2b2b28"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(px,py,4,0,Math.PI*2); ctx.stroke(); ctx.fill();
+  let z; try { z = f.fn(cursor.x, cursor.y); } catch { z = null; }
+  if (typeof z === "number" && isFinite(z)){
+    const t = `z=${z.toFixed(3)}`;
+    ctx.font = "11px monospace";
+    const tw = ctx.measureText(t).width;
+    ctx.fillStyle = "rgba(251,250,247,0.92)"; ctx.fillRect(px+8, py-20, tw+8, 16);
+    ctx.fillStyle = "#2b2b28"; ctx.textBaseline = "top"; ctx.fillText(t, px+12, py-18);
+  }
+}
+
+// ---- 3D surface mode ----
+let surfCache = { sig:null, grids:[], N:0, zmin:0, zmax:0 };
+
+function buildSurf(){
+  const N = 36;
+  const visible = compiled.filter(c => c.visible && c.fn && !c.error);
+  const sig = mode + "|" + cam.range + "|" + visible.map(c => c.id+":"+c.expr).join("|");
+  if (surfCache.sig === sig) return surfCache;
+  const grids = [];
+  let zmin = Infinity, zmax = -Infinity;
+  visible.forEach(c => {
+    const z = [];
+    for (let i=0;i<=N;i++){
+      z[i] = [];
+      const x = -cam.range + 2*cam.range*i/N;
+      for (let j=0;j<=N;j++){
+        const y = -cam.range + 2*cam.range*j/N;
+        let v; try { v = c.fn(x,y); } catch { v = NaN; }
+        if (typeof v !== "number" || !isFinite(v)) v = NaN;
+        z[i][j] = v;
+        if (!isNaN(v)) { if (v<zmin) zmin=v; if (v>zmax) zmax=v; }
+      }
+    }
+    grids.push({ color:c.color, z });
+  });
+  surfCache = { sig, grids, N, zmin, zmax };
+  return surfCache;
+}
+
+function drawSurface(){
+  const data = buildSurf();
+  if (!data.grids.length) {
+    ctx.fillStyle = "#a8a293"; ctx.font = "13px monospace"; ctx.textBaseline = "top";
+    ctx.fillText("z = f(x, y) を入力してください（例: sin(x)*cos(y)）", 20, 20);
+    return;
+  }
+  const N = data.N;
+  const zN = z => z;   // 実寸：z を x, y と同じ尺度で描画（形がそのまま出る）
+
+  const sc = Math.min(size.w, size.h) * 0.34 / cam.range * cam.zoom;
+  const cosA = Math.cos(cam.az), sinA = Math.sin(cam.az);
+  const cosE = Math.cos(cam.el), sinE = Math.sin(cam.el);
+  const proj = (x,y,z) => {
+    const x1 = x*cosA - y*sinA;
+    const y1 = x*sinA + y*cosA;
+    const y2 = y1*cosE - z*sinE;   // depth (into screen)
+    const z2 = y1*sinE + z*cosE;   // vertical
+    return [ size.w/2 + x1*sc + cam.panX, size.h/2 - z2*sc + cam.panY, y2 ];
+  };
+
+  // light direction
+  const Lr = Math.hypot(0.4,0.5,0.75);
+  const lx=0.4/Lr, ly=0.5/Lr, lz=0.75/Lr;
+
+  const cells = [];
+  data.grids.forEach(g => {
+    const z = g.z;
+    for (let i=0;i<N;i++) for (let j=0;j<N;j++){
+      const x0 = -cam.range + 2*cam.range*i/N, x1 = -cam.range + 2*cam.range*(i+1)/N;
+      const y0 = -cam.range + 2*cam.range*j/N, y1 = -cam.range + 2*cam.range*(j+1)/N;
+      const z00=z[i][j], z10=z[i+1][j], z11=z[i+1][j+1], z01=z[i][j+1];
+      if (isNaN(z00)||isNaN(z10)||isNaN(z11)||isNaN(z01)) continue;
+      const w00=[x0,y0,zN(z00)], w10=[x1,y0,zN(z10)], w11=[x1,y1,zN(z11)], w01=[x0,y1,zN(z01)];
+      const p00=proj(...w00), p10=proj(...w10), p11=proj(...w11), p01=proj(...w01);
+      const depth = (p00[2]+p10[2]+p11[2]+p01[2])/4;
+      const ux=w10[0]-w00[0], uy=w10[1]-w00[1], uz=w10[2]-w00[2];
+      const vx=w01[0]-w00[0], vy=w01[1]-w00[1], vz=w01[2]-w00[2];
+      let nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
+      const nl = Math.hypot(nx,ny,nz) || 1; nx/=nl; ny/=nl; nz/=nl;
+      const b = 0.4 + 0.6*Math.abs(nx*lx+ny*ly+nz*lz);
+      cells.push({ pts:[p00,p10,p11,p01], depth, color:shade(g.color,b) });
+    }
+  });
+  cells.sort((a,b) => b.depth - a.depth);   // far first
+
+  cells.forEach(c => {
+    ctx.beginPath();
+    ctx.moveTo(c.pts[0][0], c.pts[0][1]);
+    for (let k=1;k<4;k++) ctx.lineTo(c.pts[k][0], c.pts[k][1]);
+    ctx.closePath();
+    ctx.fillStyle = c.color; ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.10)"; ctx.lineWidth = 0.5; ctx.stroke();
+  });
+
+  drawSurfAxes(proj);
+}
+
+function fmt(v){ return String(+v.toFixed(6)); }
+function drawSurfAxes(proj){
+  const r = cam.range;
+  const step = niceStep(r/3);
+  const line = (a,b) => {
+    const p = proj(...a), q = proj(...b);
+    ctx.strokeStyle = "rgba(58,58,58,0.5)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(p[0],p[1]); ctx.lineTo(q[0],q[1]); ctx.stroke();
+  };
+  line([-r,0,0],[r,0,0]);
+  line([0,-r,0],[0,r,0]);
+  line([0,0,-r],[0,0,r]);
+
+  ctx.font = "11px monospace"; ctx.textBaseline = "middle";
+  const ticks = (mk) => {
+    for (let v = -Math.floor(r/step)*step; v <= r+1e-9; v += step){
+      if (Math.abs(v) < step/1e6) continue;
+      const p = proj(...mk(v));
+      ctx.fillStyle = "#b3ad9e";
+      ctx.beginPath(); ctx.arc(p[0],p[1],1.6,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#8a8578"; ctx.fillText(fmt(v), p[0]+3, p[1]);
+    }
+  };
+  ticks(v => [v,0,0]);
+  ticks(v => [0,v,0]);
+  ticks(v => [0,0,v]);
+
+  ctx.fillStyle = "#3a3a3a"; ctx.font = "13px monospace";
+  let p;
+  p = proj(r,0,0); ctx.fillText("x", p[0]+4, p[1]);
+  p = proj(0,r,0); ctx.fillText("y", p[0]+4, p[1]);
+  p = proj(0,0,r); ctx.fillText("z", p[0]+4, p[1]);
 }
 
 // ---- sidebar render ----
 function renderSidebar(){
   sidebar.innerHTML = "";
+
+  if (mode === "heat") {
+    const n = document.createElement("div");
+    n.className = "note";
+    n.textContent = "▦ ヒートマップは最初の表示中の関数のみ描画します。色 = z の大小、等高線つき。";
+    sidebar.append(n);
+  } else if (mode === "surface") {
+    const n = document.createElement("div");
+    n.className = "note";
+    n.textContent = "⛰ ドラッグで回転、スクロールで拡大。複数の曲面を重ねられます。縦横比は実寸（x, y, z が同じ尺度）です。";
+    sidebar.append(n);
+
+    const rc = document.createElement("div");
+    rc.className = "range-ctl";
+    const lab = document.createElement("div");
+    lab.className = "range-lab";
+    const upd = () => { lab.textContent = `表示領域  x, y ∈ [−${fmt(cam.range)}, ${fmt(cam.range)}]`; };
+    upd();
+    const sld = document.createElement("input");
+    sld.type = "range"; sld.min = "1"; sld.max = "20"; sld.step = "1"; sld.value = cam.range;
+    sld.oninput = () => { cam.range = +sld.value; surfCache.sig = null; upd(); draw(); };
+    rc.append(lab, sld);
+    sidebar.append(rc);
+
+    const vlab = document.createElement("div");
+    vlab.className = "range-lab"; vlab.textContent = "視点";
+    const vc = document.createElement("div");
+    vc.className = "views";
+    const presets = [["等角",-0.9,0.5],["正面",0,0],["上から",0,Math.PI/2],["横から",-Math.PI/2,0]];
+    presets.forEach(([name,az,el]) => {
+      const b = document.createElement("button");
+      b.textContent = name;
+      b.onclick = () => { cam.az = az; cam.el = el; draw(); };
+      vc.append(b);
+    });
+    sidebar.append(vlab, vc);
+  }
+
   fns.forEach(f => {
     const c = compiled.find(c => c.id === f.id);
     const row = document.createElement("div");
@@ -278,17 +600,17 @@ function renderSidebar(){
     sw.onclick = () => { f.visible = !f.visible; recompute(); };
 
     const yeq = document.createElement("span");
-    yeq.className = "yeq"; yeq.textContent = "y=";
+    yeq.className = "yeq"; yeq.textContent = mode === "curve" ? "y=" : "z=";
 
     const inp = document.createElement("input");
     inp.className = "expr" + (c && c.error ? " err" : "");
     inp.value = f.expr;
-    inp.placeholder = "例: cos(x) + x/2";
+    inp.placeholder = mode === "curve" ? "例: cos(x) + x/2" : "例: sin(x)*cos(y)";
     inp.spellcheck = false;
     inp.oninput = (e) => {
       f.expr = e.target.value;
       compiled = compile();
-      // light update: re-render readouts/errors + redraw, keep focus
+      heatCache.sig = null; surfCache.sig = null;
       updateRow(row, f);
       draw();
     };
@@ -321,7 +643,8 @@ function renderSidebar(){
   const footer = document.createElement("div");
   footer.className = "footer";
   footer.innerHTML = '<div class="cap">使える記法</div>' +
-    '<div class="list">sin cos tan · log ln exp · sqrt abs · ^ (べき乗) · pi e · floor mod</div>';
+    '<div class="list">sin cos tan · log ln exp · sqrt abs · ^ (べき乗) · pi e · floor mod' +
+    (mode !== "curve" ? ' · 変数 x, y' : '') + '</div>';
   sidebar.append(footer);
 }
 
@@ -334,45 +657,75 @@ function updateRow(row, f){
     const e = document.createElement("div");
     e.className = "errmsg"; e.textContent = c.error;
     ex.append(e);
-  } else if (cursor && f.visible && c && c.fn) {
-    let y; try { y = c.fn(cursor.x); } catch { y = null; }
-    if (typeof y === "number" && isFinite(y)) {
+  } else if (cursor && f.visible && c && c.fn && mode !== "surface") {
+    let val;
+    try { val = mode === "curve" ? c.fn(cursor.x) : c.fn(cursor.x, cursor.y); } catch { val = null; }
+    if (typeof val === "number" && isFinite(val)) {
       const r = document.createElement("div");
       r.className = "readout";
       r.style.color = f.color;
-      r.textContent = `(${cursor.x.toFixed(3)}, ${y.toFixed(3)})`;
+      r.textContent = mode === "curve"
+        ? `(${cursor.x.toFixed(3)}, ${val.toFixed(3)})`
+        : `(${cursor.x.toFixed(2)}, ${cursor.y.toFixed(2)}) → ${val.toFixed(3)}`;
       ex.append(r);
     }
   }
 }
 
 function refreshReadouts(){
-  Array.from(sidebar.children).forEach(row => {
-    if (row._input) {
-      const f = fns.find(x => x._input === undefined && x.expr === row._input.value);
-    }
-  });
-  // simpler: re-render extras by id mapping
-  fns.forEach((f, i) => {
-    const row = sidebar.children[i];
-    if (row && row._extra) updateRow(row, f);
-  });
+  // rows may be offset by a leading note element, so select by class
+  const rows = Array.from(sidebar.querySelectorAll(".row"));
+  fns.forEach((f, i) => { if (rows[i]) updateRow(rows[i], f); });
 }
 
 function recompute(){
   compiled = compile();
+  heatCache.sig = null; surfCache.sig = null;
   renderSidebar();
   draw();
 }
 
+// ---- mode switch ----
+document.querySelectorAll("#modes button").forEach(b => {
+  b.onclick = () => {
+    mode = b.dataset.m;
+    document.querySelectorAll("#modes button").forEach(x => x.classList.toggle("on", x === b));
+    hintEl.textContent = mode === "surface"
+      ? "drag: 回転 · shift / 右ドラッグ: 平行移動 · scroll: 拡大"
+      : "drag to pan · scroll to zoom";
+    cursor = null;
+    recompute();
+  };
+});
+
 // ---- interaction ----
 cv.addEventListener("pointerdown", e => {
-  drag = { sx:e.clientX, sy:e.clientY, cx:view.cx, cy:view.cy };
+  if (mode === "surface") {
+    const pan = e.button === 1 || e.button === 2 || e.shiftKey;
+    drag = { kind: pan ? "pan" : "rot", sx:e.clientX, sy:e.clientY,
+             az:cam.az, el:cam.el, panX:cam.panX, panY:cam.panY };
+  } else {
+    drag = { sx:e.clientX, sy:e.clientY, cx:view.cx, cy:view.cy };
+  }
   cv.setPointerCapture(e.pointerId);
 });
+cv.addEventListener("contextmenu", e => { if (mode === "surface") e.preventDefault(); });
 cv.addEventListener("pointermove", e => {
   const r = cv.getBoundingClientRect();
-  cursor = { x: toMathX(e.clientX - r.left) };
+  if (mode === "surface") {
+    if (drag) {
+      if (drag.kind === "pan") {
+        cam.panX = drag.panX + (e.clientX - drag.sx);
+        cam.panY = drag.panY + (e.clientY - drag.sy);
+      } else {
+        cam.az = drag.az + (e.clientX - drag.sx)*0.01;
+        cam.el = Math.max(-Math.PI/2, Math.min(Math.PI/2, drag.el + (e.clientY - drag.sy)*0.01));
+      }
+      draw();
+    }
+    return;
+  }
+  cursor = { x: toMathX(e.clientX - r.left), y: toMathY(e.clientY - r.top) };
   if (drag) {
     const dx = (e.clientX - drag.sx)/view.scale;
     const dy = (e.clientY - drag.sy)/view.scale;
@@ -383,10 +736,20 @@ cv.addEventListener("pointermove", e => {
   draw();
 });
 cv.addEventListener("pointerup", () => { drag = null; });
-cv.addEventListener("pointerleave", () => { cursor = null; refreshReadouts(); draw(); });
+cv.addEventListener("pointerleave", () => {
+  cursor = null;
+  if (mode !== "surface") refreshReadouts();
+  draw();
+});
 
 cv.addEventListener("wheel", e => {
   e.preventDefault();
+  if (mode === "surface") {
+    const f = e.deltaY < 0 ? 1.1 : 1/1.1;
+    cam.zoom = Math.max(0.2, Math.min(8, cam.zoom*f));
+    draw();
+    return;
+  }
   const r = cv.getBoundingClientRect();
   const px = e.clientX - r.left, py = e.clientY - r.top;
   const mx = toMathX(px), my = toMathY(py);
@@ -395,16 +758,30 @@ cv.addEventListener("wheel", e => {
   view.cx = mx - (px - size.w/2)/ns;
   view.cy = my + (py - size.h/2)/ns;
   view.scale = ns;
+  heatCache.sig = null;
   draw();
 }, { passive:false });
 
-document.getElementById("zin").onclick = () => { view.scale = Math.min(view.scale*1.25, 100000); draw(); };
-document.getElementById("zout").onclick = () => { view.scale = Math.max(view.scale*0.8, 0.5); draw(); };
-document.getElementById("reset").onclick = () => { view = {cx:0,cy:0,scale:40}; draw(); };
+document.getElementById("zin").onclick = () => {
+  if (mode === "surface") cam.zoom = Math.min(8, cam.zoom*1.25);
+  else { view.scale = Math.min(view.scale*1.25, 100000); heatCache.sig = null; }
+  draw();
+};
+document.getElementById("zout").onclick = () => {
+  if (mode === "surface") cam.zoom = Math.max(0.2, cam.zoom*0.8);
+  else { view.scale = Math.max(view.scale*0.8, 0.5); heatCache.sig = null; }
+  draw();
+};
+document.getElementById("reset").onclick = () => {
+  if (mode === "surface") { cam = { az:-0.9, el:0.5, range:6, zoom:1, panX:0, panY:0 }; surfCache.sig = null; renderSidebar(); }
+  else { view = { cx:0, cy:0, scale:40 }; heatCache.sig = null; }
+  draw();
+};
 
 // ---- resize ----
 const ro = new ResizeObserver(() => {
   size = { w: wrap.clientWidth, h: wrap.clientHeight };
+  heatCache.sig = null;
   draw();
 });
 ro.observe(wrap);
